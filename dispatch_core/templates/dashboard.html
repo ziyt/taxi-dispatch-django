@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Диспетчер — Такси</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root{
+      --bg:#0b0b0c; --panel:#111214; --stroke:#1c1d21; --text:#f3f4f6; --sub:#a9adb7;
+      --brand:#ffcc00; --brand-2:#ffd84d;
+    }
+    html,body{background:var(--bg); color:var(--text)}
+    .navbar{background:linear-gradient(90deg,var(--panel),#0e0f11); border-bottom:1px solid var(--stroke)}
+    .brand-dot{width:10px;height:10px;background:var(--brand);border-radius:50%;display:inline-block;margin-right:8px}
+    .card{background:var(--panel); border:1px solid var(--stroke); border-radius:14px}
+    .btn-brand{background:var(--brand); color:#111; border:none}
+    .btn-brand:hover{background:var(--brand-2); color:#111}
+    .btn-outline-brand{border:1px solid var(--brand); color:var(--brand); background:transparent}
+    .btn-outline-brand:hover{background:var(--brand); color:#111}
+    .table-dark{--bs-table-bg:transparent; --bs-table-striped-bg:#131417; --bs-table-border-color:var(--stroke)}
+    #map{height:460px;border-radius:14px; overflow:hidden}
+    .badge{font-weight:600}
+    .legend span{display:inline-flex;align-items:center;gap:8px;margin-right:16px}
+    .legend i{display:inline-block;width:14px;height:14px;border-radius:50%}
+    .legend .drv{background:#ffcc00}
+    .legend .cli{background:#fbbf24}
+    .legend .dst{background:#9ca3af}
+    .table thead th{color:#cbd5e1; font-weight:600}
+    .muted{color:#a9adb7}
+    .eta{font-size:12px;color:#cbd5e1}
+  </style>
+</head>
+<body>
+<nav class="navbar navbar-dark">
+  <div class="container-fluid">
+    <span class="navbar-brand mb-0 h5">
+      <span class="brand-dot"></span>Диспетчер такси
+    </span>
+    <span class="muted">Учебный прототип • Real-time</span>
+  </div>
+</nav>
+
+<div class="container my-3 my-md-4">
+  <div class="row g-3">
+    <div class="col-lg-8">
+      <div class="card p-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h6 class="m-0">Карта</h6>
+          <div class="legend">
+            <span><i class="drv"></i> водитель</span>
+            <span><i class="cli"></i> клиент (подача)</span>
+            <span><i class="dst"></i> пункт назначения</span>
+          </div>
+        </div>
+        <div id="map"></div>
+        <div class="muted mt-2">Маршрут строится по кнопке. Водитель едет по линии, время и дистанция показываются рядом с заказом.</div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card p-3 mb-3">
+        <h6 class="mb-2">Быстрый заказ</h6>
+        <form id="create-order">
+          <input class="form-control mb-2" name="phone" placeholder="+79990000000" required />
+          <input class="form-control mb-2" name="from" placeholder="Откуда (адрес)" required />
+          <input class="form-control mb-2" name="to" placeholder="Куда (адрес)" required />
+          <button class="btn btn-brand w-100" type="submit">Создать</button>
+        </form>
+        <div id="create-order-res" class="mt-2 small"></div>
+      </div>
+      <div class="card p-3">
+        <h6 class="mb-2">Статусы</h6>
+        <div id="stats" class="d-flex gap-2 flex-wrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mt-1">
+    <div class="col-lg-6">
+      <div class="card p-3">
+        <h6 class="mb-2">Водители</h6>
+        <table class="table table-sm table-dark align-middle">
+          <thead><tr><th>Позывной</th><th>Статус</th><th>Коорд.</th></tr></thead>
+          <tbody id="drivers"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="col-lg-6">
+      <div class="card p-3">
+        <h6 class="mb-2">Заказы</h6>
+        <table class="table table-sm table-dark align-middle">
+          <thead>
+            <tr><th>Клиент и маршрут</th><th>Статус</th><th class="text-end">Действия</th></tr>
+          </thead>
+          <tbody id="orders"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Яндекс.Карты: вставь свой API-ключ -->
+<script src="https://api-maps.yandex.ru/2.1/?lang=ru_RU&apikey=a552816a-1964-4f72-8a53-030d6a6f72d0"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const API = "/api/";
+const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/dispatch/";
+
+function badge(status) {
+  const m = {Available:'success', Busy:'warning', Offline:'secondary',
+             New:'info', DriverAssigned:'primary', InProgress:'warning', Completed:'success', Cancelled:'secondary'};
+  const cls = m[status] || 'light';
+  return `<span class="badge text-bg-${cls}">${status}</span>`;
+}
+function metersToStr(m) { if (m == null) return ""; return m < 1000 ? `${Math.round(m)} м` : `${(m/1000).toFixed(1)} км`; }
+function secondsToStr(s){ if (s==null) return ""; const m=Math.round(s/60); return m<60?`${m} мин`:`${Math.floor(m/60)} ч ${m%60} мин`; }
+
+/* ---------- Яндекс.Карты ---------- */
+let ymapsReady = false, map;
+let driverMarkers = {};     // id -> Placemark
+let orderFromMarkers = {};  // id -> Placemark
+let orderToMarkers   = {};  // id -> Placemark
+let routeOverlays    = {};  // orderId -> {route, animTimer}
+
+const taxiIcon = { iconLayout:'default#image', iconImageHref:'data:image/svg+xml;utf8,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><circle cx="16" cy="16" r="14" fill="#ffcc00" stroke="#111" stroke-width="2"/><rect x="10" y="13.5" width="12" height="7" rx="2" fill="#111"/><rect x="12" y="10" width="8" height="4" rx="1.5" fill="#111"/><rect x="11.5" y="15" width="2.5" height="2.5" fill="#ffcc00"/><rect x="18" y="15" width="2.5" height="2.5" fill="#ffcc00"/></svg>`), iconImageSize:[32,32], iconImageOffset:[-16,-16] };
+const clientIcon = { iconLayout:'default#image', iconImageHref:'data:image/svg+xml;utf8,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28"><circle cx="14" cy="14" r="12" fill="#fbbf24" stroke="#111" stroke-width="2"/><circle cx="14" cy="14" r="4" fill="#111"/></svg>`), iconImageSize:[28,28], iconImageOffset:[-14,-14] };
+const destIcon   = { iconLayout:'default#image', iconImageHref:'data:image/svg+xml;utf8,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26"><circle cx="13" cy="13" r="11" fill="#9ca3af" stroke="#111" stroke-width="2"/><circle cx="13" cy="13" r="3.5" fill="#111"/></svg>`), iconImageSize:[26,26], iconImageOffset:[-13,-13] };
+
+function ensurePlacemark(dict, id, coords, iconOptions, hint) {
+  if (!coords || coords.length !== 2) return;
+  if (!dict[id]) {
+    const pm = new ymaps.Placemark(coords, {hintContent: hint||""}, iconOptions);
+    dict[id] = pm; map.geoObjects.add(pm);
+  } else {
+    dict[id].geometry.setCoordinates(coords);
+    if (hint) dict[id].properties.set('hintContent', hint);
+  }
+}
+function removePlacemark(dict, id){ if (dict[id]) { map.geoObjects.remove(dict[id]); delete dict[id]; } }
+function clearRoute(orderId){ const r = routeOverlays[orderId]; if (!r) return; if (r.animTimer) clearInterval(r.animTimer); if (r.route) map.geoObjects.remove(r.route); delete routeOverlays[orderId]; }
+
+async function updateDriverPosition(driverId, lat, lng){
+  try {
+    await fetch(API + `drivers/${driverId}/position/`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({lat, lng, status:"Busy"}) });
+  } catch(e){}
+}
+
+function animateDriverAlong(orderId, driverId, pathCoords, speedMps=15){
+  if (!driverMarkers[driverId]) return;
+  const points = pathCoords.slice();
+  if (points.length < 2) return;
+
+  function hav(a,b){ const R=6371000; const toRad=x=>x*Math.PI/180; const dphi=toRad(b[0]-a[0]); const dl=toRad(b[1]-a[1]); const p1=toRad(a[0]), p2=toRad(b[0]); const c=Math.sin(dphi/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2; return 2*R*Math.asin(Math.sqrt(c)); }
+  let segLens = []; for (let i=0;i<points.length-1;i++) segLens.push(hav(points[i], points[i+1]));
+  let i=0, t=0, step=250;
+  const timer = setInterval(async ()=>{
+    if (i >= points.length-1){ clearInterval(timer); return; }
+    const p1 = points[i], p2 = points[i+1];
+    const seg = segLens[i];
+    const distPerTick = speedMps * (step/1000);
+    t += distPerTick;
+    let ratio = Math.min(1, t/seg);
+    const lat = p1[0] + (p2[0]-p1[0])*ratio;
+    const lng = p1[1] + (p2[1]-p1[1])*ratio;
+    driverMarkers[driverId].geometry.setCoordinates([lat,lng]);
+    updateDriverPosition(driverId, lat, lng);
+    if (ratio >= 1){ i++; t=0; }
+  }, step);
+  routeOverlays[orderId] = routeOverlays[orderId] || {};
+  routeOverlays[orderId].animTimer = timer;
+}
+
+async function buildRoute(orderId, fromCoords, toCoords, opts={}){
+  return ymaps.route([fromCoords, toCoords]).then((route)=>{
+    route.options.set({
+      strokeColor: opts.color || '#ffd000',
+      opacity: 0.9,
+      strokeWidth: opts.strokeWidth || 6
+    });
+    map.geoObjects.add(route);
+    const length = route.getLength();
+    const time   = route.getJamsTime();
+    routeOverlays[orderId] = routeOverlays[orderId] || {};
+    routeOverlays[orderId].route = route;
+    return {route, length, time};
+  });
+}
+
+ymaps.ready(()=>{
+  ymapsReady = true;
+  map = new ymaps.Map('map', { center:[55.751244, 37.618423], zoom:11, controls:['zoomControl'] }, { suppressMapOpenBlock:true });
+  try{ renderDrivers(); renderOrders(); }catch(e){ console.error("Render after ymaps ready failed:", e); }
+});
+
+/* ---------- Данные и UI ---------- */
+let driversCache = {};
+let ordersCache = {};
+
+function badgeEta(eta){ return eta ? `<div class="eta">≈ ${secondsToStr(eta.time)} • ${metersToStr(eta.length)}</div>` : ""; }
+
+function renderDrivers() {
+  const tbody = document.querySelector("#drivers");
+  tbody.innerHTML = "";
+  Object.values(driversCache).forEach(d => {
+    tbody.insertAdjacentHTML("beforeend",
+      `<tr><td>${d.callsign}</td><td>${badge(d.status)}</td><td>${d.lat ?? "-"}, ${d.lng ?? "-"}</td></tr>`);
+    if (ymapsReady && d.lat && d.lng) ensurePlacemark(driverMarkers, d.id, [d.lat, d.lng], taxiIcon, d.callsign);
+  });
+}
+
+function actionButtons(o){
+  const sel = Object.values(driversCache).map(d => `<option value="${d.id}">${d.callsign} (${d.status})</option>`).join("");
+  return `
+    <div class="d-flex gap-1 justify-content-end flex-wrap">
+      <button class="btn btn-sm btn-outline-brand" onclick="routeToClient('${o.id}')">Маршрут</button>
+      <button class="btn btn-sm btn-outline-brand" onclick="startRide('${o.id}')">Посадка</button>
+      <select class="form-select form-select-sm w-auto" id="pick_${o.id}">
+        <option value="">Выбрать...</option>${sel}
+      </select>
+      <button class="btn btn-sm btn-brand" onclick="assignSel('${o.id}')">Назначить</button>
+      <button class="btn btn-sm btn-outline-danger" onclick="delOrder('${o.id}')">Удалить</button>
+    </div>`;
+}
+
+function renderOrders() {
+  const tbody = document.querySelector("#orders");
+  tbody.innerHTML = "";
+  Object.values(ordersCache).forEach(o => {
+    const driverTxt = o.assigned_driver_callsign ? `→ ${o.assigned_driver_callsign}` : "";
+    const eta = o.__eta;
+    tbody.insertAdjacentHTML("beforeend",
+      `<tr>
+        <td>
+          <div>${o.customer_phone}</div>
+          <div class="muted small">${o.from_address} → ${o.to_address}</div>
+          ${badgeEta(eta)}
+        </td>
+        <td>${badge(o.status)} ${driverTxt}</td>
+        <td class="text-end">${actionButtons(o)}</td>
+      </tr>`
+    );
+    if (ymapsReady) {
+      if (o.from_lat && o.from_lng) ensurePlacemark(orderFromMarkers, o.id, [o.from_lat, o.from_lng], clientIcon, `Подача: ${o.from_address}`);
+      if (o.to_lat && o.to_lng)     ensurePlacemark(orderToMarkers,   o.id, [o.to_lat,   o.to_lng],   destIcon,   `Высадка: ${o.to_address}`);
+    }
+  });
+  document.querySelector("#stats").innerHTML =
+    `<span class="badge text-bg-info">Заказов: ${Object.keys(ordersCache).length}</span>`;
+}
+
+async function loadInitial() {
+  let r = await fetch(API + "drivers/"); (await r.json()).forEach(d => driversCache[d.id] = d);
+  r = await fetch(API + "orders/"); (await r.json()).forEach(o => ordersCache[o.id] = o);
+  renderDrivers(); renderOrders();
+}
+
+/* ======== ВСЁ, ЧТО ТЫ ПРОСИЛ В «ПУНКТЕ 2», СВЕДЕНО НИЖЕ ВМЕСТЕ ======== */
+
+// перезагрузка одного заказа и списка водителей
+async function reloadOrder(orderId){
+  const r = await fetch(API + `orders/${orderId}/`);
+  if (r.ok){ ordersCache[orderId] = await r.json(); renderOrders(); }
+}
+
+async function reloadDrivers(){
+  const r = await fetch(API + "drivers/");
+  if (r.ok){
+    driversCache = {};
+    (await r.json()).forEach(d => driversCache[d.id] = d);
+    renderDrivers(); renderOrders();
+  }
+}
+
+// надёжный доступ к координатам назначенного водителя
+function getOrderDriverCoords(order){
+  const did = order.assigned_driver || order.assigned_driver_id || order.assigned_driver_uuid;
+  if (!did) return null;
+  let d = driversCache[did];
+  if (!d) d = Object.values(driversCache).find(x => String(x.id) === String(did));
+  if (!d || d.lat == null || d.lng == null) return null;
+  return [d.lat, d.lng, d.id];
+}
+
+// назначение водителя с принудительным обновлением и автопредложением построить маршрут
+async function assignSel(orderId) {
+  const sel = document.getElementById(`pick_${orderId}`); const driverId = sel.value;
+  if (!driverId) { alert("Сначала выбери водителя."); return; }
+  await assign(orderId, driverId);
+}
+
+async function assign(orderId, driverId) {
+  const r = await fetch(API + `orders/${orderId}/assign/`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({driver_id: driverId})
+  });
+  const json = await r.json().catch(()=>null);
+  if (!r.ok) {
+    alert((json && json.detail) || `Ошибка назначения (${r.status})`);
+    return;
+  }
+  ordersCache[json.id] = json;
+  await reloadDrivers();
+  await reloadOrder(orderId);
+  if (confirm("Водитель назначен. Построить маршрут до клиента?")) {
+    routeToClient(orderId);
+  }
+}
+
+// маршруты и посадка — с жёсткими проверками и понятными ошибками
+async function routeToClient(orderId){
+  const o = ordersCache[orderId];
+  if (!o){ alert("Заказ не найден."); return; }
+  if (!o.assigned_driver){ alert("Сначала назначь водителя."); return; }
+  if (!(o.from_lat && o.from_lng)){ alert("У заказа нет координат подачи."); return; }
+
+  const dpos = getOrderDriverCoords(o);
+  if (!dpos){ alert("У водителя нет координат."); return; }
+
+  clearRoute(orderId);
+  const from = [dpos[0], dpos[1]], to = [o.from_lat, o.from_lng];
+  try{
+    const info = await buildRoute(orderId, from, to, {color:"#ffd000", strokeWidth:6});
+    o.__eta = { length: info.length, time: info.time };
+    renderOrders();
+    const geo = info.route.getPaths().get(0).getSegments().reduce((acc, seg)=>acc.concat(seg.getCoordinates()), []);
+    animateDriverAlong(orderId, dpos[2], geo, 14);
+  }catch(e){
+    console.error(e);
+    alert("Не удалось построить маршрут до клиента. Проверь ключ Яндекса и координаты.");
+  }
+}
+
+async function startRide(orderId){
+  const o = ordersCache[orderId];
+  if (!o){ alert("Заказ не найден."); return; }
+  if (!o.assigned_driver){ alert("Сначала назначь водителя."); return; }
+  if (!(o.to_lat && o.to_lng)){ alert("Нет координат точки назначения."); return; }
+
+  const r = await fetch(API + `orders/${orderId}/start/`, { method:"POST" });
+  if (!r.ok){ alert("Не удалось начать поездку"); return; }
+  const json = await r.json();
+  ordersCache[json.id] = json;
+  renderOrders();
+
+  const dpos = getOrderDriverCoords(json) || getOrderDriverCoords(o);
+  if (!dpos){ alert("У водителя нет координат."); return; }
+
+  clearRoute(orderId);
+  try{
+    const info = await buildRoute(orderId, [o.from_lat, o.from_lng], [o.to_lat, o.to_lng], {color:"#00d084", strokeWidth:6});
+    o.__eta = { length: info.length, time: info.time };
+    renderOrders();
+    const geo = info.route.getPaths().get(0).getSegments().reduce((acc, seg)=>acc.concat(seg.getCoordinates()), []);
+    animateDriverAlong(orderId, dpos[2], geo, 16);
+  }catch(e){
+    console.error(e);
+    alert("Не удалось построить маршрут поездки.");
+  }
+}
+/* ========================= КОНЕЦ ПУНКТА 2 ========================= */
+
+/* ---------- Удаление ---------- */
+async function delOrder(orderId){
+  const ok = confirm("Удалить заказ? Это действие необратимо."); if (!ok) return;
+  const r = await fetch(API + `orders/${orderId}/`, { method:"DELETE" });
+  if (r.status !== 204){ alert("Не удалось удалить"); return; }
+  delete ordersCache[orderId];
+  removePlacemark(orderFromMarkers, orderId);
+  removePlacemark(orderToMarkers, orderId);
+  clearRoute(orderId);
+  renderOrders();
+}
+
+/* ---------- WebSocket ---------- */
+function connectWS() {
+  const ws = new WebSocket(WS_URL);
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === "driver_update" && msg.driver) {
+      driversCache[msg.driver.id] = msg.driver; renderDrivers(); renderOrders();
+    }
+    if (msg.type === "order_created" && msg.order) {
+      ordersCache[msg.order.id] = msg.order; renderOrders();
+    }
+    if (msg.type === "order_assigned" && msg.order) {
+      ordersCache[msg.order.id] = msg.order; renderOrders();
+    }
+    if (msg.type === "order_started" && msg.order) {
+      ordersCache[msg.order.id] = msg.order; renderOrders();
+    }
+    if (msg.type === "order_completed" && msg.order) {
+      ordersCache[msg.order.id] = msg.order; renderOrders(); clearRoute(msg.order.id);
+    }
+    if (msg.type === "order_deleted" && msg.order_id) {
+      const id = msg.order_id; delete ordersCache[id];
+      removePlacemark(orderFromMarkers, id); removePlacemark(orderToMarkers, id); clearRoute(id);
+      renderOrders();
+    }
+  };
+  ws.onclose = () => setTimeout(connectWS, 1500);
+}
+
+/* ---------- Форма создания ---------- */
+document.addEventListener("submit", async (e) => {
+  if (e.target && e.target.id === "create-order"){
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const payload = { customer_phone: f.get("phone"), from_address: f.get("from"), to_address: f.get("to") };
+    const res = await fetch(API + "orders/", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(payload) });
+    const json = await res.json();
+    document.querySelector("#create-order-res").textContent = res.ok ? "Заказ создан" : ("Ошибка: " + (json.detail || res.status));
+    if (res.ok) e.target.reset();
+  }
+});
+
+/* ---------- Старт ---------- */
+(async function init(){ await loadInitial(); connectWS(); })();
+</script>
+</body>
+</html>
